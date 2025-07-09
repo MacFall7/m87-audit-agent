@@ -1,0 +1,12 @@
+{
+  "spot_violations": [
+    "Hardcoded secrets in test_jwts.txt file"
+  ],
+  "fort_violations": [
+    "Missing docstrings for test methods",
+    "Missing type hints for test methods",
+    "setUp() method mutates global state by setting self.client",
+    "test_expired_token() and onwards not indented properly under if __name__ == '__main__' block"
+  ],
+  "summary": "The test code violates one SPOT rule by having hardcoded JWTs in the test_jwts.txt file. It also violates several FORT rules, including missing docstrings and type hints for test methods, mutating global state in the setUp() method, and having improperly indented test methods. To improve this test code, the hardcoded JWTs should be removed, docstrings and type hints added, the setUp() method refactored to avoid global state mutation, and indentation fixed for the last few test methods."
+}
