@@ -8,11 +8,24 @@ import sys
 import json
 import time
 import hashlib
-import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
 import yaml
+
+
+class GovernanceValidationError(Exception):
+    """Raised when Claude output fails schema validation after all retries."""
+
+    def __init__(self, message, retry_trace=None):
+        super().__init__(message)
+        self.retry_trace = retry_trace or []
+
+
+REQUIRED_FIELDS = {"spot_violations", "fort_violations", "passed", "risk_level", "summary"}
+VALID_RISK_LEVELS = {"CLEAN", "LOW", "MEDIUM", "HIGH", "CRITICAL"}
+FAILURES_DIR = Path(__file__).parent / "failures"
 
 
 def load_rules(rules_path):
@@ -78,11 +91,12 @@ def build_receipt(
     model,
     duration_seconds,
     previous_receipt_hash,
+    retry_count=0,
 ):
     """Build a tamper-evident audit receipt with hash chaining."""
     file_hash = compute_hash(file_content)
     rules_hash = compute_hash(Path(rules_path).read_text(encoding="utf-8"))
-    timestamp = datetime.datetime.utcnow().isoformat() + "Z"
+    timestamp = datetime.now(timezone.utc).isoformat()
 
     receipt_body = {
         "version": "2.0",
@@ -103,6 +117,7 @@ def build_receipt(
             "spot_violation_count": len(audit_result.get("spot_violations", [])),
             "fort_violation_count": len(audit_result.get("fort_violations", [])),
             "summary": audit_result.get("summary", ""),
+            "retry_count": retry_count,
         },
         "chain": {
             "previous_receipt_hash": previous_receipt_hash,
@@ -148,6 +163,116 @@ def call_claude(prompt):
         return json.loads(text)
     except json.JSONDecodeError as e:
         raise RuntimeError(f"Failed to parse Claude response as JSON: {e}")
+
+
+def validate_audit_result(data):
+    """Validate audit result against required schema. Returns (valid, reason)."""
+    if not isinstance(data, dict):
+        return False, f"Response must be a JSON object, got: {type(data).__name__}"
+    missing = REQUIRED_FIELDS - data.keys()
+    if missing:
+        return False, f"Missing required fields: {missing}"
+    if not isinstance(data["spot_violations"], list):
+        return False, "spot_violations must be a list"
+    if not isinstance(data["fort_violations"], list):
+        return False, "fort_violations must be a list"
+    if not isinstance(data["passed"], bool):
+        return False, f"passed must be a boolean, got: {type(data['passed']).__name__}"
+    if data["risk_level"] not in VALID_RISK_LEVELS:
+        return False, f"risk_level must be one of {VALID_RISK_LEVELS}, got: '{data['risk_level']}'"
+    return True, ""
+
+
+def save_failure(prompt, raw_response, reason):
+    """Persist a failed LLM response as a negative example."""
+    FAILURES_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    failure = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "reason": reason,
+        "raw_response": raw_response,
+    }
+    path = FAILURES_DIR / f"failure.{ts}.json"
+    path.write_text(json.dumps(failure, indent=2), encoding="utf-8")
+
+
+def load_negative_examples(max_examples=5):
+    """Load the N most recent failure examples for prompt injection."""
+    if not FAILURES_DIR.exists():
+        return []
+    failures = sorted(FAILURES_DIR.glob("failure.*.json"), reverse=True)[:max_examples]
+    examples = []
+    for f in failures:
+        try:
+            examples.append(json.loads(f.read_text(encoding="utf-8")))
+        except (json.JSONDecodeError, OSError):
+            continue
+    return examples
+
+
+def inject_negative_examples(prompt, examples):
+    """Inject failure examples into prompt as counter-examples."""
+    if not examples:
+        return prompt
+    counter_block = "\n\n## Counter-examples (do NOT produce output like these)\n"
+    for ex in examples:
+        counter_block += f"\n- Reason this failed: {ex['reason']}\n"
+        counter_block += f"  Bad output: {ex['raw_response'][:200]}\n"
+    return prompt + counter_block
+
+
+def call_claude_with_validation(
+    prompt,
+    validator=validate_audit_result,
+    max_retries=3,
+):
+    """
+    Call Claude with schema validation and retry loop.
+
+    On validation failure, re-prompts with the specific failure reason attached.
+    Persists failures to the failure store as negative examples.
+    Fails closed after max_retries — never returns invalid output.
+
+    Returns (result, retry_count).
+    """
+    retry_trace = []
+
+    # Load and inject negative examples into initial prompt
+    examples = load_negative_examples()
+    active_prompt = inject_negative_examples(prompt, examples)
+
+    for attempt in range(max_retries):
+        try:
+            result = call_claude(active_prompt)
+        except RuntimeError as e:
+            raw = str(e)
+            reason = f"JSON parse failure: {e}"
+            save_failure(active_prompt, raw, reason)
+            retry_trace.append({"attempt": attempt + 1, "reason": reason})
+            active_prompt = (
+                prompt
+                + f"\n\nYour previous response failed validation for this reason:\n{reason}"
+                + "\n\nReturn only valid JSON matching the required schema. Try again."
+            )
+            continue
+
+        valid, reason = validator(result)
+        if valid:
+            return result, attempt  # attempt=0 means first try succeeded
+
+        # Validation failed — save to failure store and build retry prompt
+        save_failure(active_prompt, json.dumps(result), reason)
+        retry_trace.append({"attempt": attempt + 1, "reason": reason})
+        active_prompt = (
+            prompt
+            + f"\n\nYour previous response failed validation for this reason:\n{reason}"
+            + "\n\nReturn only valid JSON matching the required schema. Try again."
+        )
+
+    raise GovernanceValidationError(
+        f"Claude output failed schema validation after {max_retries} attempts",
+        retry_trace=retry_trace,
+    )
 
 
 def collect_targets(paths):
@@ -204,7 +329,7 @@ def main():
         start = time.time()
         content = target.read_text(encoding="utf-8")
         prompt = build_prompt(content, str(target), rules_text)
-        result = call_claude(prompt)
+        result, retry_count = call_claude_with_validation(prompt)
         duration = round(time.time() - start, 2)
 
         receipt = build_receipt(
@@ -215,6 +340,7 @@ def main():
             model=args.model,
             duration_seconds=duration,
             previous_receipt_hash=previous_hash,
+            retry_count=retry_count,
         )
         previous_hash = receipt["receipt_hash"]
 

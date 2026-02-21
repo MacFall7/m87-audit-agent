@@ -5,3 +5,4 @@ __pycache__/
 *.receipt.json
 .DS_Store
 .pytest_cache/
+failures/

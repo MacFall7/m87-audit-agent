@@ -25,6 +25,13 @@ from audit_agent import (
     call_claude,
     collect_targets,
     main,
+    validate_audit_result,
+    call_claude_with_validation,
+    save_failure,
+    load_negative_examples,
+    inject_negative_examples,
+    GovernanceValidationError,
+    FAILURES_DIR,
 )
 
 
@@ -308,7 +315,7 @@ def _run_main_with_args(argv, mock_result, rules_path, tmp_path):
 
     full_argv = [str(target), "--rules", str(rules_path)] + argv
 
-    with patch("audit_agent.call_claude", return_value=mock_result), \
+    with patch("audit_agent.call_claude_with_validation", return_value=(mock_result, 0)), \
          patch("sys.argv", ["audit_agent"] + full_argv):
         main()
 
@@ -332,3 +339,129 @@ def test_fail_on_violations_exits_0_when_clean(rules_path, tmp_path, clean_audit
     with pytest.raises(SystemExit) as exc:
         _run_main_with_args(["--fail-on-violations"], clean_audit_result, rules_path, tmp_path)
     assert exc.value.code == 0
+
+
+# ---------------------------------------------------------------------------
+# Schema validator
+# ---------------------------------------------------------------------------
+
+def test_validate_audit_result_passes_clean_result(clean_audit_result):
+    valid, reason = validate_audit_result(clean_audit_result)
+    assert valid is True
+    assert reason == ""
+
+
+def test_validate_audit_result_missing_field(clean_audit_result):
+    del clean_audit_result["risk_level"]
+    valid, reason = validate_audit_result(clean_audit_result)
+    assert valid is False
+    assert "Missing required fields" in reason
+
+
+def test_validate_audit_result_invalid_risk_level(clean_audit_result):
+    clean_audit_result["risk_level"] = "UNKNOWN"
+    valid, reason = validate_audit_result(clean_audit_result)
+    assert valid is False
+    assert "risk_level must be one of" in reason
+
+
+def test_validate_audit_result_wrong_type_passed(clean_audit_result):
+    clean_audit_result["passed"] = "yes"
+    valid, reason = validate_audit_result(clean_audit_result)
+    assert valid is False
+    assert "passed must be a boolean" in reason
+
+
+def test_validate_audit_result_violations_not_list(clean_audit_result):
+    clean_audit_result["spot_violations"] = None
+    valid, reason = validate_audit_result(clean_audit_result)
+    assert valid is False
+    assert "spot_violations must be a list" in reason
+
+
+# ---------------------------------------------------------------------------
+# Validation retry loop
+# ---------------------------------------------------------------------------
+
+def test_validation_succeeds_first_attempt(clean_audit_result):
+    with patch("audit_agent.call_claude", return_value=clean_audit_result), \
+         patch("audit_agent.load_negative_examples", return_value=[]):
+        result, retries = call_claude_with_validation("test prompt")
+    assert result == clean_audit_result
+    assert retries == 0
+
+
+def test_validation_retries_on_schema_failure(clean_audit_result):
+    bad_result = {"not": "valid"}
+    with patch("audit_agent.call_claude", side_effect=[bad_result, clean_audit_result]), \
+         patch("audit_agent.load_negative_examples", return_value=[]), \
+         patch("audit_agent.save_failure"):
+        result, retries = call_claude_with_validation("test prompt")
+    assert result == clean_audit_result
+    assert retries == 1
+
+
+def test_validation_fails_closed_after_max_retries():
+    bad_result = {"not": "valid"}
+    with patch("audit_agent.call_claude", return_value=bad_result), \
+         patch("audit_agent.load_negative_examples", return_value=[]), \
+         patch("audit_agent.save_failure"):
+        with pytest.raises(GovernanceValidationError, match="failed schema validation after 3 attempts"):
+            call_claude_with_validation("test prompt", max_retries=3)
+
+
+def test_retry_trace_attached_to_exception():
+    bad_result = {"not": "valid"}
+    with patch("audit_agent.call_claude", return_value=bad_result), \
+         patch("audit_agent.load_negative_examples", return_value=[]), \
+         patch("audit_agent.save_failure"):
+        with pytest.raises(GovernanceValidationError) as exc:
+            call_claude_with_validation("test prompt", max_retries=2)
+    assert len(exc.value.retry_trace) == 2
+    assert exc.value.retry_trace[0]["attempt"] == 1
+    assert exc.value.retry_trace[1]["attempt"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Failure store
+# ---------------------------------------------------------------------------
+
+def test_save_and_load_negative_examples(tmp_path, monkeypatch):
+    monkeypatch.setattr("audit_agent.FAILURES_DIR", tmp_path / "failures")
+    save_failure("prompt text", '{"bad": true}', "Missing required fields")
+    examples = load_negative_examples()
+    assert len(examples) == 1
+    assert examples[0]["reason"] == "Missing required fields"
+    assert examples[0]["raw_response"] == '{"bad": true}'
+
+
+def test_inject_negative_examples_appends_to_prompt():
+    examples = [{"reason": "bad field", "raw_response": '{"x": 1}'}]
+    result = inject_negative_examples("original prompt", examples)
+    assert "original prompt" in result
+    assert "Counter-examples" in result
+    assert "bad field" in result
+
+
+def test_inject_negative_examples_empty_returns_unchanged():
+    result = inject_negative_examples("original prompt", [])
+    assert result == "original prompt"
+
+
+# ---------------------------------------------------------------------------
+# Receipt with retry_count
+# ---------------------------------------------------------------------------
+
+def test_receipt_includes_retry_count(sample_py, rules_path, clean_audit_result):
+    content = sample_py.read_text()
+    receipt = build_receipt(
+        file_path=sample_py,
+        file_content=content,
+        audit_result=clean_audit_result,
+        rules_path=rules_path,
+        model="claude-opus-4-6",
+        duration_seconds=1.0,
+        previous_receipt_hash=None,
+        retry_count=2,
+    )
+    assert receipt["result"]["retry_count"] == 2
