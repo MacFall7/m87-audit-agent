@@ -24,6 +24,7 @@ from audit_agent import (
     build_receipt,
     call_claude,
     collect_targets,
+    main,
 )
 
 
@@ -294,3 +295,40 @@ def test_collect_targets_skips_non_py(tmp_path):
     f.touch()
     targets = collect_targets([str(f)])
     assert len(targets) == 0
+
+
+# ---------------------------------------------------------------------------
+# --fail-on-violations flag
+# ---------------------------------------------------------------------------
+
+def _run_main_with_args(argv, mock_result, rules_path, tmp_path):
+    """Helper to invoke main() with mocked API and given CLI args."""
+    target = tmp_path / "code.py"
+    target.write_text("x = 1\n")
+
+    full_argv = [str(target), "--rules", str(rules_path)] + argv
+
+    with patch("audit_agent.call_claude", return_value=mock_result), \
+         patch("sys.argv", ["audit_agent"] + full_argv):
+        main()
+
+
+def test_fail_on_violations_exits_1_when_violations(rules_path, tmp_path, dirty_audit_result):
+    """With --fail-on-violations, violations should exit 1."""
+    with pytest.raises(SystemExit) as exc:
+        _run_main_with_args(["--fail-on-violations"], dirty_audit_result, rules_path, tmp_path)
+    assert exc.value.code == 1
+
+
+def test_no_fail_flag_exits_0_even_with_violations(rules_path, tmp_path, dirty_audit_result):
+    """Without --fail-on-violations, violations should still exit 0 (audit-only mode)."""
+    with pytest.raises(SystemExit) as exc:
+        _run_main_with_args([], dirty_audit_result, rules_path, tmp_path)
+    assert exc.value.code == 0
+
+
+def test_fail_on_violations_exits_0_when_clean(rules_path, tmp_path, clean_audit_result):
+    """With --fail-on-violations but no violations, should exit 0."""
+    with pytest.raises(SystemExit) as exc:
+        _run_main_with_args(["--fail-on-violations"], clean_audit_result, rules_path, tmp_path)
+    assert exc.value.code == 0

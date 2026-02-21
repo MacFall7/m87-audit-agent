@@ -177,6 +177,11 @@ def main():
     parser.add_argument(
         "--output-dir", default=".", help="Directory for receipt JSON files"
     )
+    parser.add_argument(
+        "--fail-on-violations",
+        action="store_true",
+        help="Exit 1 if any violations found (CI gate mode)",
+    )
     args = parser.parse_args()
 
     rules_path = Path(args.rules)
@@ -223,7 +228,7 @@ def main():
             all_passed = False
         print(f"  [{status}] {result['risk_level']} — {receipt_path}")
 
-    sys.exit(0 if all_passed else 1)
+    sys.exit(1 if (not all_passed and args.fail_on_violations) else 0)
 
 
 if __name__ == "__main__":
