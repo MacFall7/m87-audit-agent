@@ -1,98 +1,230 @@
+"""
+M87 Audit Agent v2 — Governed Python code auditor.
+Deterministic enforcement, cryptographic receipts, CI-ready.
+"""
+
 import os
 import sys
 import json
 import time
+import hashlib
+import datetime
+from pathlib import Path
+
 import requests
+import yaml
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-MODEL = "claude-3-opus-20240229"
 
-SPOT_RULES = [
-    "No usage of eval() or exec()",
-    "No hardcoded credentials or secrets",
-    "No external API calls without validation",
-    "Must include docstrings and type hints"
-]
+def load_rules(rules_path):
+    """Load and validate a YAML rules file."""
+    rules_path = Path(rules_path)
+    if not rules_path.exists():
+        raise FileNotFoundError(f"Rules file not found: {rules_path}")
 
-FORT_RULES = [
-    "Function complexity must be <= 10 lines",
-    "Must not mutate global state",
-    "Disallowed use of dangerous imports (e.g., os.system)"
-]
+    with open(rules_path, "r", encoding="utf-8") as f:
+        schema = yaml.safe_load(f)
 
-def load_code_from_file(file_path):
-    with open(file_path, "r", encoding="utf-8") as f:
-        return f.read()
+    for section in ("SPOT", "FORT"):
+        if section not in schema:
+            raise ValueError(f"Missing required section: {section}")
 
-def build_prompt(code, file_name):
-    rules = "\n".join(f"- {r}" for r in SPOT_RULES + FORT_RULES)
-    prompt = (
-        f"You are a security governance agent auditing source code.\n\n"
-        f"File: `{file_name}`\n\n"
-        f"## Audit Rules (SPOT and FORT):\n\n"
-        f"{rules}\n\n"
-        f"## Code to Audit:\n\n"
-        f"{code}\n\n"
-        f"## Response Format:\n"
-        f"Respond in JSON with:\n"
-        f'- "spot_violations": List of SPOT rule violations\n'
-        f'- "fort_violations": List of FORT rule violations\n'
-        f'- "summary": Short paragraph summarizing audit\n\n'
-        f"Return only the JSON. Begin."
+    return schema
+
+
+def format_rules_for_prompt(schema):
+    """Format loaded rules into a text block for the audit prompt."""
+    lines = []
+    for section_key in ("SPOT", "FORT"):
+        section = schema[section_key]
+        lines.append(f"## {section_key} — {section.get('description', '')}")
+        for rule in section.get("rules", []):
+            severity = rule.get("severity", "medium").upper()
+            lines.append(
+                f"  - [{rule['id']}] {rule['name']} ({severity}): {rule['description']}"
+            )
+        lines.append("")
+    return "\n".join(lines)
+
+
+def build_prompt(code, file_name, rules_text):
+    """Construct the deterministic audit prompt."""
+    return (
+        "You are M87 Audit Agent, a governed security and runtime compliance auditor.\n"
+        "Analyze the following Python file against the rules below.\n\n"
+        f"File: {file_name}\n\n"
+        f"Rules:\n{rules_text}\n\n"
+        f"Code:\n```python\n{code}\n```\n\n"
+        "Respond with ONLY a JSON object (no markdown fences, no commentary):\n"
+        "{\n"
+        '  "spot_violations": [{"rule_id": "...", "severity": "...", "line": N, "description": "..."}],\n'
+        '  "fort_violations": [{"rule_id": "...", "severity": "...", "line": N, "description": "..."}],\n'
+        '  "passed": true/false,\n'
+        '  "risk_level": "CLEAN|LOW|MEDIUM|HIGH|CRITICAL",\n'
+        '  "summary": "One-line summary"\n'
+        "}"
     )
-    return prompt
 
-def call_claude(prompt: str):
-    url = "https://api.anthropic.com/v1/messages"
-    headers = {
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json"
+
+def compute_hash(content):
+    """SHA-256 hash of a string."""
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def build_receipt(
+    file_path,
+    file_content,
+    audit_result,
+    rules_path,
+    model,
+    duration_seconds,
+    previous_receipt_hash,
+):
+    """Build a tamper-evident audit receipt with hash chaining."""
+    file_hash = compute_hash(file_content)
+    rules_hash = compute_hash(Path(rules_path).read_text(encoding="utf-8"))
+    timestamp = datetime.datetime.utcnow().isoformat() + "Z"
+
+    receipt_body = {
+        "version": "2.0",
+        "timestamp": timestamp,
+        "file": {
+            "path": str(file_path),
+            "hash": file_hash,
+        },
+        "rules": {
+            "path": str(rules_path),
+            "hash": rules_hash,
+        },
+        "model": model,
+        "duration_seconds": duration_seconds,
+        "result": {
+            "passed": audit_result["passed"],
+            "risk_level": audit_result["risk_level"],
+            "spot_violation_count": len(audit_result.get("spot_violations", [])),
+            "fort_violation_count": len(audit_result.get("fort_violations", [])),
+            "summary": audit_result.get("summary", ""),
+        },
+        "chain": {
+            "previous_receipt_hash": previous_receipt_hash,
+        },
     }
 
-    payload = {
-        "model": MODEL,
-        "max_tokens": 1024,
-        "temperature": 0.2,
-        "messages": [
-            {"role": "user", "content": prompt}
-        ]
-    }
+    receipt_hash = compute_hash(json.dumps(receipt_body, sort_keys=True))
+    receipt_body["receipt_hash"] = receipt_hash
+    return receipt_body
 
-    response = requests.post(url, headers=headers, json=payload)
+
+def call_claude(prompt):
+    """Call the Anthropic Messages API and return parsed JSON."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise EnvironmentError("ANTHROPIC_API_KEY environment variable is not set.")
+
+    response = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={
+            "model": "claude-opus-4-6",
+            "max_tokens": 4096,
+            "temperature": 0,
+            "messages": [{"role": "user", "content": prompt}],
+        },
+    )
     response.raise_for_status()
-    content = response.json()["content"][0]["text"]
-    return json.loads(content)
 
-def audit_file(file_path):
-    print(f"\n🔍 Auditing: {file_path}")
-    code = load_code_from_file(file_path)
-    prompt = build_prompt(code, file_path)
-    result = call_claude(prompt)
-    return result
+    text = response.json()["content"][0]["text"].strip()
+
+    # Strip markdown fences if present
+    if text.startswith("```"):
+        lines = text.split("\n")
+        lines = [l for l in lines if not l.strip().startswith("```")]
+        text = "\n".join(lines).strip()
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Failed to parse Claude response as JSON: {e}")
+
+
+def collect_targets(paths):
+    """Resolve a list of paths into .py file targets."""
+    if not paths:
+        return sorted(Path(".").glob("*.py"))
+
+    targets = []
+    for p in paths:
+        p = Path(p)
+        if p.is_dir():
+            targets.extend(sorted(p.glob("**/*.py")))
+        elif p.is_file() and p.suffix == ".py":
+            targets.append(p)
+    return targets
+
 
 def main():
-    if len(sys.argv) > 1:
-        # Audit single file
-        targets = [sys.argv[1]]
-    else:
-        # Audit all .py files in parent dir (excluding audits)
-        base_dir = os.path.join(os.path.dirname(__file__), "..")
-        targets = [
-            os.path.join(base_dir, f)
-            for f in os.listdir(base_dir)
-            if f.endswith(".py") and not f.endswith(".audit.json")
-        ]
+    import argparse
 
-    for file_path in targets:
-        result = audit_file(file_path)
-        file_name = os.path.basename(file_path)
-        output_path = f"{file_name}.audit.json"
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(result, f, indent=2)
-        print(f"✅ Audit complete for {file_name} → {output_path}")
+    parser = argparse.ArgumentParser(description="M87 Audit Agent v2")
+    parser.add_argument("targets", nargs="*", help="Files or directories to audit")
+    parser.add_argument("--rules", default="rules.yaml", help="Path to rules YAML")
+    parser.add_argument(
+        "--model", default="claude-opus-4-6", help="Anthropic model ID"
+    )
+    parser.add_argument(
+        "--output-dir", default=".", help="Directory for receipt JSON files"
+    )
+    args = parser.parse_args()
+
+    rules_path = Path(args.rules)
+    schema = load_rules(rules_path)
+    rules_text = format_rules_for_prompt(schema)
+
+    targets = collect_targets(args.targets)
+    if not targets:
+        print("No .py files found to audit.")
+        sys.exit(0)
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    previous_hash = None
+    all_passed = True
+
+    for target in targets:
+        print(f"Auditing: {target}")
+        start = time.time()
+        content = target.read_text(encoding="utf-8")
+        prompt = build_prompt(content, str(target), rules_text)
+        result = call_claude(prompt)
+        duration = round(time.time() - start, 2)
+
+        receipt = build_receipt(
+            file_path=target,
+            file_content=content,
+            audit_result=result,
+            rules_path=rules_path,
+            model=args.model,
+            duration_seconds=duration,
+            previous_receipt_hash=previous_hash,
+        )
+        previous_hash = receipt["receipt_hash"]
+
+        receipt_path = output_dir / f"{target.name}.receipt.json"
+        receipt_path.write_text(
+            json.dumps(receipt, indent=2) + "\n", encoding="utf-8"
+        )
+
+        status = "PASS" if result["passed"] else "FAIL"
+        if not result["passed"]:
+            all_passed = False
+        print(f"  [{status}] {result['risk_level']} — {receipt_path}")
+
+    sys.exit(0 if all_passed else 1)
+
 
 if __name__ == "__main__":
-    start = time.time()
     main()
-    print(f"\n🕒 Total audit time: {round(time.time() - start, 2)}s")
