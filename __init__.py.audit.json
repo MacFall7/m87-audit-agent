@@ -1,5 +1,0 @@
-{
-  "spot_violations": [],
-  "fort_violations": [],
-  "summary": "The provided code is an empty `__init__.py` file, likely used as a package marker. As there is no actual code, no SPOT or FORT violations were found during the audit. The file does not contain any executable statements, hardcoded secrets, external API calls, or dangerous imports."
-}

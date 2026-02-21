@@ -1,0 +1,51 @@
+version: "1.0"
+ruleset_id: "m87-default-v1"
+description: "M87 Studio default audit rules — SPOT + FORT"
+
+SPOT:
+  description: "Security Prevention & Output Tracking"
+  rules:
+    - id: SPOT-001
+      name: No eval/exec
+      description: "Forbids eval(), exec(), and compile() calls"
+      severity: critical
+    - id: SPOT-002
+      name: No hardcoded secrets
+      description: "No string literals matching secret/key/password/token patterns"
+      severity: critical
+    - id: SPOT-003
+      name: Validated external calls
+      description: "HTTP/subprocess calls must validate inputs and responses"
+      severity: high
+    - id: SPOT-004
+      name: No unsafe deserialization
+      description: "Forbids pickle.loads, yaml.load without SafeLoader"
+      severity: critical
+    - id: SPOT-005
+      name: Input sanitization
+      description: "User-facing inputs must be sanitized before use"
+      severity: high
+
+FORT:
+  description: "Framework-Oriented Runtime Trust"
+  rules:
+    - id: FORT-001
+      name: Function complexity
+      description: "Functions must not exceed 50 statements"
+      severity: medium
+    - id: FORT-002
+      name: No global mutation
+      description: "Functions must not mutate module-level state"
+      severity: medium
+    - id: FORT-003
+      name: No dangerous imports
+      description: "Forbids os.system, subprocess.call with shell=True"
+      severity: high
+    - id: FORT-004
+      name: Explicit return types
+      description: "Public functions must have return type annotations"
+      severity: low
+    - id: FORT-005
+      name: No wildcard imports
+      description: "Forbids 'from module import *'"
+      severity: low

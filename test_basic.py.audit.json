@@ -1,8 +1,0 @@
-{
-  "spot_violations": [],
-  "fort_violations": [
-    "Missing docstring for test_health_check function",
-    "Missing type hints for test_health_check function"
-  ],
-  "summary": "The provided code does not contain any critical security violations based on the SPOT rules. However, it is missing a docstring and type hints for the test_health_check function, which are required according to the FORT rules. Adding these would improve the code's documentation and maintainability. Overall, the code appears to be a simple health check test for a FastAPI application and does not pose any significant security risks."
-}

@@ -2,5 +2,6 @@ __pycache__/
 *.pyc
 *.pyo
 .env
-*.audit.json
+*.receipt.json
 .DS_Store
+.pytest_cache/
