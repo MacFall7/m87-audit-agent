@@ -26,6 +26,10 @@ class GovernanceValidationError(Exception):
 REQUIRED_FIELDS = {"spot_violations", "fort_violations", "passed", "risk_level", "summary"}
 VALID_RISK_LEVELS = {"CLEAN", "LOW", "MEDIUM", "HIGH", "CRITICAL"}
 FAILURES_DIR = Path(__file__).parent / "failures"
+MAX_FAILURES = 50
+
+
+REQUIRED_RULE_KEYS = {"id", "name", "description"}
 
 
 def load_rules(rules_path):
@@ -40,6 +44,18 @@ def load_rules(rules_path):
     for section in ("SPOT", "FORT"):
         if section not in schema:
             raise ValueError(f"Missing required section: {section}")
+        section_data = schema[section]
+        if not isinstance(section_data, dict):
+            raise ValueError(f"{section} must be a mapping, got: {type(section_data).__name__}")
+        rules = section_data.get("rules")
+        if not isinstance(rules, list):
+            raise ValueError(f"{section}.rules must be a list")
+        for i, rule in enumerate(rules):
+            if not isinstance(rule, dict):
+                raise ValueError(f"{section}.rules[{i}] must be a mapping")
+            missing = REQUIRED_RULE_KEYS - rule.keys()
+            if missing:
+                raise ValueError(f"{section}.rules[{i}] missing required keys: {missing}")
 
     return schema
 
@@ -129,26 +145,36 @@ def build_receipt(
     return receipt_body
 
 
+API_TIMEOUT = 30  # seconds — fail closed rather than hang a CI pipeline
+
+
 def call_claude(prompt):
     """Call the Anthropic Messages API and return parsed JSON."""
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise EnvironmentError("ANTHROPIC_API_KEY environment variable is not set.")
 
-    response = requests.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
-        json={
-            "model": "claude-opus-4-6",
-            "max_tokens": 4096,
-            "temperature": 0,
-            "messages": [{"role": "user", "content": prompt}],
-        },
-    )
+    try:
+        response = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-opus-4-6",
+                "max_tokens": 4096,
+                "temperature": 0,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=API_TIMEOUT,
+        )
+    except requests.exceptions.Timeout:
+        raise RuntimeError(
+            f"Claude API call timed out after {API_TIMEOUT}s. "
+            "Pipeline cannot proceed without a response — failing closed."
+        )
     response.raise_for_status()
 
     text = response.json()["content"][0]["text"].strip()
@@ -194,6 +220,11 @@ def save_failure(prompt, raw_response, reason):
     }
     path = FAILURES_DIR / f"failure.{ts}.json"
     path.write_text(json.dumps(failure, indent=2), encoding="utf-8")
+
+    # Rotate: keep only the MAX_FAILURES most recent files
+    all_failures = sorted(FAILURES_DIR.glob("failure.*.json"))
+    for stale in all_failures[:-MAX_FAILURES]:
+        stale.unlink()
 
 
 def load_negative_examples(max_examples=5):
