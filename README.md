@@ -7,7 +7,7 @@
   <code>temperature: 0</code> &nbsp;&middot;&nbsp;
   <code>SHA-256 receipt chain</code> &nbsp;&middot;&nbsp;
   <code>fails closed</code> &nbsp;&middot;&nbsp;
-  <code>46 tests</code>
+  <code>50 tests</code>
 </p>
 
 <p align="center">
@@ -175,6 +175,17 @@ Each section **must** be a mapping with a `rules` key containing a list.
 Severity levels: `critical`, `high`, `medium`, `low`.
 
 Rules are validated at load time. A malformed rules file raises `ValueError` before any audit runs -- not mid-pipeline.
+
+### Tuning the default rules
+
+The default ruleset ships with 10 rules. Some are strict by design and may produce noise in codebases that don't follow the convention they enforce:
+
+| Rule | What it enforces | When to disable |
+|---|---|---|
+| `FORT-004` | Public functions must have return type annotations | Your team doesn't use strict type annotations. Most Python codebases will trigger this. |
+| `FORT-005` | No wildcard imports | You use `from module import *` intentionally (e.g., re-exporting in `__init__.py`). |
+
+To disable a rule, remove it from your `rules.yaml`. There is no `enabled: false` flag -- if a rule is in the file, it's enforced.
 
 ### Writing custom rules
 
@@ -408,7 +419,7 @@ pip install pytest requests pyyaml
 pytest tests/ -v
 ```
 
-46 tests. No network calls. All API interactions are mocked.
+50 tests. No network calls. All API interactions are mocked.
 
 ### Test coverage by area
 
@@ -419,6 +430,7 @@ pytest tests/ -v
 | Hashing & receipts | 5 | SHA-256 correctness, determinism, different inputs, receipt structure, chain linking |
 | Receipt fields | 2 | Violation counts, retry count |
 | API call (mocked) | 6 | Markdown fence stripping, clean JSON, missing API key, invalid JSON, timeout, timeout kwarg |
+| Model threading | 4 | Default model sent, custom model sent, model threaded through validation, `--model` flag reaches API call |
 | Target collection | 4 | Empty glob, single file, directory recursion, non-py skip |
 | `--fail-on-violations` | 3 | Violations + flag = exit 1, violations no flag = exit 0, clean + flag = exit 0 |
 | Schema validator | 5 | Valid result, missing field, invalid risk level, wrong type, non-list violations |

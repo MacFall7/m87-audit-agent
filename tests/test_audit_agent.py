@@ -35,6 +35,7 @@ from audit_agent import (
     FAILURES_DIR,
     MAX_FAILURES,
     API_TIMEOUT,
+    DEFAULT_MODEL,
 )
 
 
@@ -571,3 +572,68 @@ def test_call_claude_passes_timeout_to_requests():
 
     _, kwargs = mock_post.call_args
     assert kwargs["timeout"] == API_TIMEOUT
+
+
+# ---------------------------------------------------------------------------
+# Model parameter threading
+# ---------------------------------------------------------------------------
+
+def test_call_claude_uses_default_model():
+    """call_claude() with no model arg should send DEFAULT_MODEL to the API."""
+    mock_result = {"passed": True, "spot_violations": [], "fort_violations": [], "risk_level": "CLEAN", "summary": "ok"}
+
+    with patch("audit_agent.requests.post") as mock_post:
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"content": [{"text": json.dumps(mock_result)}]}
+        mock_response.raise_for_status = MagicMock()
+        mock_post.return_value = mock_response
+
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+            call_claude("test prompt")
+
+    _, kwargs = mock_post.call_args
+    assert kwargs["json"]["model"] == DEFAULT_MODEL
+
+
+def test_call_claude_uses_custom_model():
+    """call_claude(model=...) should send the specified model to the API."""
+    mock_result = {"passed": True, "spot_violations": [], "fort_violations": [], "risk_level": "CLEAN", "summary": "ok"}
+
+    with patch("audit_agent.requests.post") as mock_post:
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"content": [{"text": json.dumps(mock_result)}]}
+        mock_response.raise_for_status = MagicMock()
+        mock_post.return_value = mock_response
+
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+            call_claude("test prompt", model="claude-haiku-4-5-20251001")
+
+    _, kwargs = mock_post.call_args
+    assert kwargs["json"]["model"] == "claude-haiku-4-5-20251001"
+
+
+def test_call_claude_with_validation_threads_model():
+    """call_claude_with_validation() should pass model to call_claude()."""
+    clean = {"spot_violations": [], "fort_violations": [], "passed": True, "risk_level": "CLEAN", "summary": "ok"}
+
+    with patch("audit_agent.call_claude", return_value=clean) as mock_call, \
+         patch("audit_agent.load_negative_examples", return_value=[]):
+        call_claude_with_validation("test prompt", model="claude-haiku-4-5-20251001")
+
+    _, kwargs = mock_call.call_args
+    assert kwargs["model"] == "claude-haiku-4-5-20251001"
+
+
+def test_main_threads_model_to_validation(rules_path, tmp_path, clean_audit_result):
+    """--model flag value should reach call_claude_with_validation()."""
+    target = tmp_path / "code.py"
+    target.write_text("x = 1\n")
+
+    with patch("audit_agent.call_claude_with_validation", return_value=(clean_audit_result, 0)) as mock_val, \
+         patch("sys.argv", ["audit_agent", str(target), "--rules", str(rules_path), "--model", "claude-haiku-4-5-20251001"]):
+        with pytest.raises(SystemExit) as exc:
+            main()
+        assert exc.value.code == 0
+
+    _, kwargs = mock_val.call_args
+    assert kwargs["model"] == "claude-haiku-4-5-20251001"
