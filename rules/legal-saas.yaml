@@ -1,0 +1,51 @@
+version: "1.0"
+ruleset_id: "m87-legal-saas-v1"
+description: "M87 rules for multi-tenant legal SaaS — agents with access to contract data, tenant context, and document processing pipelines"
+
+SPOT:
+  description: "Security Prevention & Output Tracking — Legal SaaS"
+  rules:
+    - id: SPOT-L01
+      name: No dynamic code evaluation
+      description: "Forbids exec(), eval(), compile(), __import__() on any input derived from tenant or user data"
+      severity: critical
+    - id: SPOT-L02
+      name: Tenant context required
+      description: "Functions accessing document or contract data must accept and validate a tenant_id parameter"
+      severity: critical
+    - id: SPOT-L03
+      name: No cross-tenant data paths
+      description: "Variable names or patterns suggesting tenant data must not be passed to functions operating on a different tenant context"
+      severity: critical
+    - id: SPOT-L04
+      name: No unvalidated document input
+      description: "Raw file content or user-supplied strings must pass through a validation step before reaching parsing or processing logic"
+      severity: high
+    - id: SPOT-L05
+      name: No hardcoded tenant identifiers
+      description: "Tenant IDs, org IDs, or client references must not appear as string literals"
+      severity: high
+
+FORT:
+  description: "Framework-Oriented Runtime Trust — Legal SaaS"
+  rules:
+    - id: FORT-L01
+      name: Privilege boundary declarations
+      description: "Functions that cross privilege boundaries (e.g. admin to tenant) must have explicit scope annotations or comments"
+      severity: high
+    - id: FORT-L02
+      name: No silent exception suppression
+      description: "Bare 'except: pass' or 'except Exception: pass' forbidden in document processing or auth paths — failures must surface"
+      severity: high
+    - id: FORT-L03
+      name: Audit log required on mutations
+      description: "Functions that write, update, or delete contract or document data must include a logging call"
+      severity: high
+    - id: FORT-L04
+      name: No string interpolation in queries
+      description: "f-strings or .format() calls in database query contexts forbidden — parameterized queries required"
+      severity: critical
+    - id: FORT-L05
+      name: External call isolation
+      description: "Calls to third-party APIs (e-signature, OCR, LLM) must be wrapped in a dedicated adapter function, not called inline"
+      severity: medium
