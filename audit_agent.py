@@ -148,7 +148,10 @@ def build_receipt(
 API_TIMEOUT = 30  # seconds — fail closed rather than hang a CI pipeline
 
 
-def call_claude(prompt):
+DEFAULT_MODEL = "claude-opus-4-6"
+
+
+def call_claude(prompt, model=DEFAULT_MODEL):
     """Call the Anthropic Messages API and return parsed JSON."""
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
@@ -163,7 +166,7 @@ def call_claude(prompt):
                 "content-type": "application/json",
             },
             json={
-                "model": "claude-opus-4-6",
+                "model": model,
                 "max_tokens": 4096,
                 "temperature": 0,
                 "messages": [{"role": "user", "content": prompt}],
@@ -254,6 +257,7 @@ def inject_negative_examples(prompt, examples):
 
 def call_claude_with_validation(
     prompt,
+    model=DEFAULT_MODEL,
     validator=validate_audit_result,
     max_retries=3,
 ):
@@ -274,7 +278,7 @@ def call_claude_with_validation(
 
     for attempt in range(max_retries):
         try:
-            result = call_claude(active_prompt)
+            result = call_claude(active_prompt, model=model)
         except RuntimeError as e:
             raw = str(e)
             reason = f"JSON parse failure: {e}"
@@ -328,7 +332,7 @@ def main():
     parser.add_argument("targets", nargs="*", help="Files or directories to audit")
     parser.add_argument("--rules", default="rules.yaml", help="Path to rules YAML")
     parser.add_argument(
-        "--model", default="claude-opus-4-6", help="Anthropic model ID"
+        "--model", default=DEFAULT_MODEL, help="Anthropic model ID"
     )
     parser.add_argument(
         "--output-dir", default=".", help="Directory for receipt JSON files"
@@ -360,7 +364,7 @@ def main():
         start = time.time()
         content = target.read_text(encoding="utf-8")
         prompt = build_prompt(content, str(target), rules_text)
-        result, retry_count = call_claude_with_validation(prompt)
+        result, retry_count = call_claude_with_validation(prompt, model=args.model)
         duration = round(time.time() - start, 2)
 
         receipt = build_receipt(
