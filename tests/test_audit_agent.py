@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
+import requests
 import yaml
 
 # Adjust path for imports
@@ -32,6 +33,8 @@ from audit_agent import (
     inject_negative_examples,
     GovernanceValidationError,
     FAILURES_DIR,
+    MAX_FAILURES,
+    API_TIMEOUT,
 )
 
 
@@ -465,3 +468,106 @@ def test_receipt_includes_retry_count(sample_py, rules_path, clean_audit_result)
         retry_count=2,
     )
     assert receipt["result"]["retry_count"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Failure store rotation
+# ---------------------------------------------------------------------------
+
+def test_failure_store_rotates_beyond_max(tmp_path, monkeypatch):
+    """save_failure() should delete oldest files when count exceeds MAX_FAILURES."""
+    monkeypatch.setattr("audit_agent.FAILURES_DIR", tmp_path / "failures")
+    monkeypatch.setattr("audit_agent.MAX_FAILURES", 3)
+
+    for i in range(5):
+        save_failure("prompt", f"bad-{i}", f"reason-{i}")
+
+    failures_dir = tmp_path / "failures"
+    remaining = sorted(failures_dir.glob("failure.*.json"))
+    assert len(remaining) <= 3
+
+
+def test_failure_store_keeps_recent(tmp_path, monkeypatch):
+    """After rotation, the most recent failure should still be loadable."""
+    monkeypatch.setattr("audit_agent.FAILURES_DIR", tmp_path / "failures")
+    monkeypatch.setattr("audit_agent.MAX_FAILURES", 2)
+
+    save_failure("p", "old-response", "old-reason")
+    save_failure("p", "new-response", "new-reason")
+
+    examples = load_negative_examples(max_examples=10)
+    responses = [e["raw_response"] for e in examples]
+    assert "new-response" in responses
+
+
+# ---------------------------------------------------------------------------
+# Rule schema validation on load
+# ---------------------------------------------------------------------------
+
+def test_load_rules_rejects_non_dict_section(tmp_path):
+    """A section that is a string instead of a mapping should raise ValueError."""
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(yaml.dump({"SPOT": "not-a-dict", "FORT": {"description": "x", "rules": []}}))
+    with pytest.raises(ValueError, match="SPOT must be a mapping"):
+        load_rules(bad)
+
+
+def test_load_rules_rejects_missing_rules_list(tmp_path):
+    """A section without a 'rules' key (or rules as non-list) should raise ValueError."""
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(yaml.dump({
+        "SPOT": {"description": "x", "rules": "not-a-list"},
+        "FORT": {"description": "y", "rules": []},
+    }))
+    with pytest.raises(ValueError, match="SPOT.rules must be a list"):
+        load_rules(bad)
+
+
+def test_load_rules_rejects_rule_missing_keys(tmp_path):
+    """A rule missing id/name/description should raise ValueError at load time."""
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(yaml.dump({
+        "SPOT": {
+            "description": "x",
+            "rules": [{"id": "SPOT-001", "name": "No eval"}],  # missing description
+        },
+        "FORT": {"description": "y", "rules": []},
+    }))
+    with pytest.raises(ValueError, match="missing required keys"):
+        load_rules(bad)
+
+
+def test_load_rules_accepts_valid_rules(rules_path):
+    """Existing well-formed rules fixture should still load cleanly."""
+    schema = load_rules(rules_path)
+    assert len(schema["SPOT"]["rules"]) == 1
+    assert schema["SPOT"]["rules"][0]["id"] == "SPOT-001"
+
+
+# ---------------------------------------------------------------------------
+# API timeout
+# ---------------------------------------------------------------------------
+
+def test_call_claude_timeout_raises_runtime_error():
+    """A timeout from requests should surface as RuntimeError (fail closed)."""
+    with patch("audit_agent.requests.post", side_effect=requests.exceptions.Timeout("timed out")):
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+            with pytest.raises(RuntimeError, match="timed out after"):
+                call_claude("prompt")
+
+
+def test_call_claude_passes_timeout_to_requests():
+    """requests.post should receive the timeout kwarg."""
+    mock_result = {"passed": True, "spot_violations": [], "fort_violations": [], "risk_level": "CLEAN", "summary": "ok"}
+
+    with patch("audit_agent.requests.post") as mock_post:
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"content": [{"text": json.dumps(mock_result)}]}
+        mock_response.raise_for_status = MagicMock()
+        mock_post.return_value = mock_response
+
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+            call_claude("test prompt")
+
+    _, kwargs = mock_post.call_args
+    assert kwargs["timeout"] == API_TIMEOUT
