@@ -1,29 +1,29 @@
 version: "1.0"
 ruleset_id: "m87-default-v1"
-description: "M87 Studio default audit rules — SPOT + FORT"
+description: "M87 Studio default audit rules"
 
 SPOT:
   description: "Security Prevention & Output Tracking"
   rules:
     - id: SPOT-001
       name: No eval/exec
-      description: "Forbids eval(), exec(), and compile() calls"
+      description: "Forbids eval(), exec(), and compile() calls in any context"
       severity: critical
     - id: SPOT-002
       name: No hardcoded secrets
       description: "No string literals matching secret/key/password/token patterns"
       severity: critical
     - id: SPOT-003
-      name: Validated external calls
-      description: "HTTP/subprocess calls must validate inputs and responses"
-      severity: high
-    - id: SPOT-004
-      name: No unsafe deserialization
-      description: "Forbids pickle.loads, yaml.load without SafeLoader"
+      name: No shell injection
+      description: "os.system(), subprocess calls must not use string formatting or f-strings for command construction"
       severity: critical
+    - id: SPOT-004
+      name: No pickle on untrusted input
+      description: "pickle.loads() must not be called on user-supplied or externally sourced data"
+      severity: high
     - id: SPOT-005
-      name: Input sanitization
-      description: "User-facing inputs must be sanitized before use"
+      name: No unvalidated redirect
+      description: "HTTP redirects must not use unvalidated user input as the redirect target"
       severity: high
 
 FORT:
@@ -38,14 +38,14 @@ FORT:
       description: "Functions must not mutate module-level state"
       severity: medium
     - id: FORT-003
-      name: No dangerous imports
-      description: "Forbids os.system, subprocess.call with shell=True"
-      severity: high
+      name: No bare except
+      description: "except clauses must specify an exception type — bare except: is forbidden"
+      severity: medium
     - id: FORT-004
-      name: Explicit return types
+      name: Return type annotations required
       description: "Public functions must have return type annotations"
       severity: low
     - id: FORT-005
       name: No wildcard imports
-      description: "Forbids 'from module import *'"
+      description: "from module import * is forbidden"
       severity: low
